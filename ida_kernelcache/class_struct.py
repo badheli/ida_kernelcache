@@ -121,9 +121,9 @@ import collections
 import idc
 import idautils
 import idaapi
-import ida_struct
 
 from . import ida_utilities as idau
+from . import compat
 from . import build_struct
 from . import classes
 from . import data_flow
@@ -233,7 +233,7 @@ def _create_class_structs__slices(classinfo, endmarkers=False):
     sid = idau.struct_open(classname)
     if (sid):
         _log(1, f'IDA has already created {classname} struct, renaming it.')
-        if (not ida_struct.set_struc_name(sid, f'ida_{classname}')):
+        if (not compat.set_struc_name(sid, f'ida_{classname}')):
             _log(-1, 'failed to rename IDA struct')
             # XXX: should we return in this case?
 
@@ -241,7 +241,7 @@ def _create_class_structs__slices(classinfo, endmarkers=False):
     if sid is None or sidf is None:
         _log(0, 'Could not create class structs for {}', classname)
         return None
-    assert all(not idc.is_union(s) for s in (sidf, sid))
+    assert all(not compat.is_union(s) for s in (sidf, sid))
     # Calculate the size of the ::fields struct.
     if classinfo.superclass:
         # If we have a superclass, our fields start after our superclass's fields end.
@@ -252,8 +252,8 @@ def _create_class_structs__slices(classinfo, endmarkers=False):
     fields_size = classinfo.class_size - fields_start
     # Add an ::end member to the fields struct if requested.
     if endmarkers and fields_size > 0:
-        ret = idc.add_struc_member(sidf, classname + '::end', fields_size - 1, idc.FF_UNK, -1, 1)
-        if ret not in (0, idc.STRUC_ERROR_MEMBER_NAME, idc.STRUC_ERROR_MEMBER_OFFSET):
+        ret = compat.add_struc_member(sidf, classname + '::end', fields_size - 1, compat.FF_UNK, -1, 1)
+        if ret not in (0, compat.STRUC_ERROR_MEMBER_NAME, compat.STRUC_ERROR_MEMBER_OFFSET):
             # If that didn't work that's too bad, but continue anyway.
             _log(0, 'Could not create {}::end', classname)
     return sid, sidf, fields_start
@@ -268,13 +268,17 @@ def _populate_fields_struct__slices(sid, classinfo, accesses, fields_start):
     # Last member of ::fields struct is ::end.
     # ::end is a zero-sized array, and this causes a lot of problems :P
     # So we we make it padding instead...
-    struct_t = ida_struct.get_struc(sid)
-    fields_size = classinfo.class_size - fields_start    
-    last_member = struct_t.get_last_member()
-    offset = last_member.get_soff() + last_member.get_size() if last_member else 0
+    fields_size = classinfo.class_size - fields_start
+    # Find last member via idautils so we don't need ida_struct.get_struc().
+    members = list(idautils.StructMembers(sid))
+    if members:
+        last_off, _last_name, last_sz = members[-1]
+        offset = last_off + last_sz
+    else:
+        offset = 0
     size = fields_size - offset            
     if size > 0:
-        idc.add_struc_member(sid, classinfo.classname + '::end', offset, idc.FF_DATA | idc.FF_BYTE, -1, size)
+        compat.add_struc_member(sid, classinfo.classname + '::end', offset, compat.FF_DATA | compat.FF_BYTE, -1, size)
 
 def _populate_wrapper_struct__slices(sid, classinfo):
     """Fill in the members of the wrapper struct."""
@@ -282,7 +286,7 @@ def _populate_wrapper_struct__slices(sid, classinfo):
     offset = 0
     vtable_ptr_type = '{}::vtable *'.format(classinfo.classname)
     ret = idau.struct_add_ptr(sid, 'vtable', offset, type=vtable_ptr_type)
-    if ret not in (0, idc.STRUC_ERROR_MEMBER_OFFSET):
+    if ret not in (0, compat.STRUC_ERROR_MEMBER_OFFSET):
         _log(0, 'Could not create {}.vtable: {}', classinfo.classname, ret)
         return False
     # Now add all the ::fields structs.
@@ -294,12 +298,12 @@ def _populate_wrapper_struct__slices(sid, classinfo):
             _log(0, 'Could not find {}::fields', ci.classname)
             return False
         # If this is a 0-length struct (no fields), skip it.
-        size = ida_struct.get_struc_size(fields_sid)
+        size = compat.get_struc_size(fields_sid)
         if size == 0:
             continue
         # If this is already in the wrapper struct, skip it. This avoids weird
         # STRUC_ERROR_MEMBER_VARLAST errors.
-        if idc.get_member_offset(sid, ci.classname) != -1:
+        if compat.get_member_offset(sid, ci.classname) != -1:
             continue
         # TODO: this is a temp solution to have templated classes names resolved well. Need a permanent one.
         # example: iOS17b1 OSValueObject<OSKextRequestResourceCallback>::fields field on the struct: OSValueObject<OSKextRequestResourceCallback>
@@ -342,7 +346,7 @@ def _populate_wrapper_struct__unions(sid, classinfo):
     # First add the vtable pointer.
     vtable_ptr_type = '{}::vtable *'.format(classinfo.classname)
     ret = idau.struct_add_ptr(sid, 'vtable', -1, type=vtable_ptr_type)
-    if ret not in (0, idc.STRUC_ERROR_MEMBER_NAME):
+    if ret not in (0, compat.STRUC_ERROR_MEMBER_NAME):
         _log(0, 'Could not create {}.vtable: {}', classinfo.classname, ret)
         return False
     # Now add all the ::fields structs.
@@ -355,7 +359,7 @@ def _populate_wrapper_struct__unions(sid, classinfo):
         # Add the ::fields struct to the wrapper. Ignore STRUC_ERROR_MEMBER_UNIVAR if the ::fields
         # struct has length 0.
         ret = idau.struct_add_struct(sid, ci.classname, -1, fields_sid)
-        if ret not in (0, idc.STRUC_ERROR_MEMBER_NAME, idc.STRUC_ERROR_MEMBER_UNIVAR):
+        if ret not in (0, compat.STRUC_ERROR_MEMBER_NAME, compat.STRUC_ERROR_MEMBER_UNIVAR):
             _log(0, '_populate_wrapper_struct__unions: For sid: {} and msid: {} Could not create {}.{}: {}', sid, fields_sid, classinfo.classname, ci.classname, ret)
             return False
     return True
@@ -489,7 +493,7 @@ def _set_class_style(style):
         idau.struct_create('OSObject', union=want_union)
     else:
         # A style already exists. Check that the requested style matches.
-        is_union = bool(idc.is_union(sid))
+        is_union = compat.is_union(sid)
         if is_union != want_union:
             raise ValueError('Incompatible style {}', style)
     # Set the appropriate functions based on the style.
@@ -559,8 +563,8 @@ def _propagate_virtual_method_type_for_method(classinfo, class_vindex, vmethod):
         return False
     vmethods_sid = idau.struct_open(classinfo.classname + '::vmethods')
     vmethod_offset = class_vindex * idau.WORD_SIZE
-    vmethod_mid = idc.get_member_id(vmethods_sid, vmethod_offset)
-    if not bool(idc.SetType(vmethod_mid, vmethod_ptr_type)):
+    vmethod_mid = compat.get_member_id(vmethods_sid, vmethod_offset)
+    if not compat.set_type(vmethod_mid, vmethod_ptr_type):
         _log(2, 'Could not set vmethod field type: {:x}, {}, {}', vmethod, classinfo.classname,
                 class_vindex)
         return False

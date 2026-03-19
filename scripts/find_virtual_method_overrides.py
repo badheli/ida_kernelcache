@@ -10,6 +10,7 @@ def kernelcache_find_virtual_method_overrides(classname=None, method=None):
     import idaapi
     import ida_name
     import ida_kernelcache as kc
+    from ida_kernelcache import compat
 
     # Define the form to ask for the arguments.
     class MyForm(idaapi.Form):
@@ -51,7 +52,7 @@ Find virtual method overrides
     for classinfo in baseinfo.descendants():
         for _, override, _ in kc.vtable.class_vtable_overrides(classinfo, superinfo=baseinfo,
                 methods=True):
-            name = idc.get_name(override, ida_name.GN_VISIBLE | idc.calc_gtn_flags(idc.BADADDR, override))
+            name = idc.get_name(override, ida_name.GN_VISIBLE | compat.calc_gtn_flags(idc.BADADDR, override))
             demangled = idc.demangle_name(name, idc.get_inf_attr(idc.INF_SHORT_DEMNAMES))
             name = demangled if demangled else name
             if method in name:
