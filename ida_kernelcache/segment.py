@@ -15,10 +15,16 @@ from . import kernel
 
 _log = idau.make_log(0, __name__)
 
-idc.import_type(-1, 'mach_header_64')
-idc.import_type(-1, 'load_command')
-idc.import_type(-1, 'segment_command_64')
-idc.import_type(-1, 'section_64')
+# import_type is a no-op (returns -1) when no database is open or when the
+# type already exists; wrap in try/except in case the API was removed in
+# a future IDA version.
+try:
+    idc.import_type(-1, 'mach_header_64')
+    idc.import_type(-1, 'load_command')
+    idc.import_type(-1, 'segment_command_64')
+    idc.import_type(-1, 'section_64')
+except Exception:
+    pass
 
 _LC_SEGMENT_64 = 0x19
 

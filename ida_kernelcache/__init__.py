@@ -43,6 +43,14 @@ def kernelcache_process(untag_pointers=True):
     import idaapi
     import idc
     import ida_auto
+    # Re-initialize kernel globals in case the module was imported before a
+    # database was open (they default to None in that situation).
+    if kernel.base is None:
+        kernel.base = kernel.find_kernel_base()
+    if kernel.prelink_info is None:
+        kernel.prelink_info = kernel.parse_prelink_info()
+    if kernel.kernelcache_format is None:
+        kernel.kernelcache_format = kernel._get_kernelcache_format()
     def autoanalyze():
         ida_auto.auto_wait()
     autoanalyze()
