@@ -7,6 +7,7 @@
 #
 
 import re
+import struct as _struct
 import idc
 from ida_segment import SEGPERM_READ, SEGPERM_WRITE, SEGPERM_EXEC
 
@@ -15,18 +16,73 @@ from . import kernel
 
 _log = idau.make_log(0, __name__)
 
-# import_type is a no-op (returns -1) when no database is open or when the
-# type already exists; wrap in try/except in case the API was removed in
-# a future IDA version.
-try:
-    idc.import_type(-1, 'mach_header_64')
-    idc.import_type(-1, 'load_command')
-    idc.import_type(-1, 'segment_command_64')
-    idc.import_type(-1, 'section_64')
-except Exception:
-    pass
-
 _LC_SEGMENT_64 = 0x19
+
+# ---------------------------------------------------------------------------
+# Direct Mach-O structure reader
+# ---------------------------------------------------------------------------
+# IDA 9.x removed idc.import_type(), so we can no longer rely on IDA's struct
+# system to parse Mach-O headers.  Instead we read the raw bytes ourselves
+# using Python's struct module (little-endian ARM64 only, which covers all
+# modern iOS/macOS kernelcaches).
+
+# (struct_format, field_names, fixed_size)
+_MACHO_HDR64 = (
+    '<IiiIIIII',   # 8 fields × 4 bytes = 32 bytes
+    ['magic', 'cputype', 'cpusubtype', 'filetype', 'ncmds', 'sizeofcmds', 'flags', 'reserved'],
+    32,
+)
+_LOAD_CMD = (
+    '<II',         # 2 × 4 bytes = 8 bytes
+    ['cmd', 'cmdsize'],
+    8,
+)
+_SEG_CMD64 = (
+    '<II16sQQQQiiII',  # 72 bytes
+    ['cmd', 'cmdsize', 'segname', 'vmaddr', 'vmsize', 'fileoff', 'filesize',
+     'maxprot', 'initprot', 'nsects', 'flags'],
+    72,
+)
+_SECT64 = (
+    '<16s16sQQIIIIIIII',  # 80 bytes
+    ['sectname', 'segname', 'addr', 'size', 'offset', 'align', 'reloff',
+     'nreloc', 'flags', 'reserved1', 'reserved2', 'reserved3'],
+    80,
+)
+
+
+class _MachOObj:
+    """Lightweight attribute bag returned by _read_macho_struct.
+
+    Mimics the objectview interface used by the rest of this file:
+      int(obj)  → start EA
+      len(obj)  → struct size in bytes
+    """
+    def __init__(self, ea, size, fields):
+        self._ea   = ea
+        self._size = size
+        for k, v in fields.items():
+            setattr(self, k, v)
+
+    def __int__(self):
+        return self._ea
+
+    def __len__(self):
+        return self._size
+
+
+def _read_macho_struct(ea, fmt_names_size):
+    """Read a raw Mach-O struct from the database at *ea*.
+
+    *fmt_names_size* is one of the _MACHO_HDR64 / _LOAD_CMD / … tuples above.
+    Returns a _MachOObj on success, None on failure (short read, unmapped, etc.).
+    """
+    fmt, names, size = fmt_names_size
+    data = idc.get_bytes(ea, size)
+    if data is None or len(data) < size:
+        return None
+    values = _struct.unpack_from(fmt, data)
+    return _MachOObj(ea, size, dict(zip(names, values)))
 
 
 def _segments():
@@ -55,32 +111,40 @@ def _fix_kernel_segments():
             idc.set_segm_attr(seg_off, idc.SEGATTR_PERM, perms)
 
 
-def _convert_list_to_bytes(l):
-    return bytes(l) if type(l) is list else l
-    
-
 def _macho_segments_and_sections(ea):
-    """A generator to iterate through a Mach-O file's segments and sections.
+    """Iterate through a Mach-O file's segments and sections.
 
-    Each iteration yields a tuple:
+    Reads structures directly from the IDA database via idc.get_bytes() so
+    that no IDA struct definitions (mach_header_64 etc.) need to be imported.
+
+    Each iteration yields:
         (segname, segstart, segend, [(sectname, sectstart, sectend), ...])
     """
-    hdr   = idau.read_struct(ea, 'mach_header_64', asobject=True)
+    hdr = _read_macho_struct(ea, _MACHO_HDR64)
+    if hdr is None:
+        _log(0, 'Could not read mach_header_64 at {:#x}', ea)
+        return
     nlc   = hdr.ncmds
     lc    = int(hdr) + len(hdr)
     lcend = lc + hdr.sizeofcmds
     while lc < lcend and nlc > 0:
-        loadcmd = idau.read_struct(lc, 'load_command', asobject=True)
+        loadcmd = _read_macho_struct(lc, _LOAD_CMD)
+        if loadcmd is None or loadcmd.cmdsize < 8:
+            break
         if loadcmd.cmd == _LC_SEGMENT_64:
-            segcmd = idau.read_struct(lc, 'segment_command_64', asobject=True)
-            segname  = idau.null_terminated(_convert_list_to_bytes(segcmd.segname))
+            segcmd = _read_macho_struct(lc, _SEG_CMD64)
+            if segcmd is None:
+                break
+            segname  = idau.null_terminated(segcmd.segname)
             segstart = segcmd.vmaddr
             segend   = segstart + segcmd.vmsize
             sects    = []
-            sc  = int(segcmd) + len(segcmd)
-            for i in range(segcmd.nsects):
-                sect = idau.read_struct(sc, 'section_64', asobject=True)
-                sectname  = idau.null_terminated(_convert_list_to_bytes(sect.sectname))
+            sc = int(segcmd) + len(segcmd)
+            for _ in range(segcmd.nsects):
+                sect = _read_macho_struct(sc, _SECT64)
+                if sect is None:
+                    break
+                sectname  = idau.null_terminated(sect.sectname)
                 sectstart = sect.addr
                 sectend   = sectstart + sect.size
                 sects.append((sectname, sectstart, sectend))
@@ -162,8 +226,15 @@ def initialize_segments():
     _initialize_segments_in_kext(None, kernel.base, skip=kernel_skip)
     # Process each kext identified by the __PRELINK_INFO. In the new kernelcache format 12-merged,
     # the _PrelinkExecutableLoadAddr key is missing for all kexts, so no extra segment renaming
-    # takes place.
-    prelink_info_dicts = kernel.prelink_info['_PrelinkInfoDictionary']
+    # takes place.  On iOS 16+ kernelcaches __PRELINK_INFO may be absent or in a format we cannot
+    # yet parse, so guard against prelink_info being None.
+    if kernel.prelink_info is None:
+        _log(0, 'No __PRELINK_INFO found; skipping per-kext segment renaming')
+        return
+    prelink_info_dicts = kernel.prelink_info.get('_PrelinkInfoDictionary', [])
+    if not prelink_info_dicts:
+        _log(1, '__PRELINK_INFO has no _PrelinkInfoDictionary; skipping per-kext segment renaming')
+        return
     for kext_prelink_info in prelink_info_dicts:
         kext = kext_prelink_info.get('CFBundleIdentifier', None)
         mach_header = kext_prelink_info.get('_PrelinkExecutableLoadAddr', None)

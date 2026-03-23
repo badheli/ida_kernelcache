@@ -17,31 +17,38 @@ from . import kplist
 _log = idau.make_log(0, __name__)
 
 def find_kernel_base():
-    """Find the kernel base.
-
-    Returns the base address of the kernel Mach-O, or raises RuntimeError if
-    the database does not appear to contain a kernelcache (e.g. no file is
-    open yet).
-    """
-    # get_fileregion_ea returns BADADDR (0xffffffffffffffff on 64-bit) when no
-    # file offset 0 mapping exists.  Guard against both the hardcoded value and
-    # the idaapi constant so the check works on 32-bit databases as well.
+    """Find the kernel base."""
+    # Method 1: Get the start of the very first region of the file.
     base = idaapi.get_fileregion_ea(0)
-    if base not in (idaapi.BADADDR, 0xffffffffffffffff):
+    if base != idaapi.BADADDR:
         return base
-    seg = [s for s in map(idaapi.get_segm_by_name,
-                          ['__TEXT.HEADER', '__TEXT:HEADER']) if s]
-    if not seg:
-        raise RuntimeError("unable to find kernel base")
-    return seg[0].start_ea
+    
+    # Method 2: Find a segment named '__TEXT.HEADER' or '__TEXT:HEADER'.
+    seg = [seg for seg in map(idaapi.get_segm_by_name, ['__TEXT.HEADER', '__TEXT:HEADER']) if seg]
+    if seg:
+        return seg[0].start_ea
 
-# Module-level initialisation is deferred: these are set to None when the
-# plugin loads before a database is open, and the real values are filled in
-# once a kernelcache is actually analysed.
-try:
-    base = find_kernel_base()
-except Exception:
-    base = None
+    # Method 3: Search for the Mach-O magic number as a last resort.
+    _log(1, "Could not find kernel base by segment name, searching for Mach-O header magic...")
+    # MH_MAGIC_64 = 0xFEEDFACF
+    # In little-endian bytes, this is CF FA ED FE.
+    magic_bytes = b'\xCF\xFA\xED\xFE'
+    for seg_start in idautils.Segments():
+        seg = idaapi.getseg(seg_start)
+        if not seg:
+            continue
+        # Search only in the first few bytes of each segment for efficiency
+        search_end = min(seg.start_ea + 0x1000, seg.end_ea)
+        addr = idc.find_binary(seg.start_ea, search_end, magic_bytes.hex(), 16, idaapi.SEARCH_DOWN)
+        if addr != idaapi.BADADDR:
+            _log(0, "Found potential kernel base at {:#x} in segment '{}'", addr, idc.get_segm_name(seg))
+            # Rename the segment for consistency
+            idc.set_segm_name(addr, '__TEXT.HEADER')
+            return addr
+
+    raise RuntimeError("unable to find kernel base")
+
+base = find_kernel_base()
 """The kernel base address (the address of the main kernel Mach-O header)."""
 
 def _find_prelink_info_segments():
@@ -87,10 +94,7 @@ def parse_prelink_info():
     _log(0, 'Could not find __PRELINK_INFO')
     return None
 
-try:
-    prelink_info = parse_prelink_info()
-except Exception:
-    prelink_info = None
+prelink_info = parse_prelink_info()
 """The kernel __PRELINK_INFO dictionary."""
 
 KC_11_NORMAL = '11-normal'
@@ -102,8 +106,5 @@ def _get_kernelcache_format():
         return KC_11_NORMAL
     return KC_12_MERGED
 
-try:
-    kernelcache_format = _get_kernelcache_format()
-except Exception:
-    kernelcache_format = None
+kernelcache_format = _get_kernelcache_format()
 
