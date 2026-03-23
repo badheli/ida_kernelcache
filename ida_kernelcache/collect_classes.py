@@ -427,7 +427,7 @@ def dref_cast_and_ref_to_obj(expr, dref_obj=False):
     return expr.obj_ea
 
 def iterate_over_metaclasses(found_metaclass):
-    OSObject_str = next(s for s in idautils.Strings() if str(s) == "OSObject")
+    OSObject_str = next((s for s in idautils.Strings() if str(s) == "OSObject"), None)
     if not OSObject_str:
         _log(1, "Couldn't find OSObject str")
         return

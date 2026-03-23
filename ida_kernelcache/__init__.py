@@ -54,12 +54,7 @@ def kernelcache_process(untag_pointers=True):
     def autoanalyze():
         ida_auto.auto_wait()
     autoanalyze()
-    if (kernel.kernelcache_format == kernel.KC_12_MERGED
-            and untag_pointers
-            and idaapi.IDA_SDK_VERSION < 720):
-        print('Processing tagged kernelcache pointers')
-        tagged_pointers.untag_pointers()
-        autoanalyze()
+    # IDA 9.x handles tagged pointer fixups natively; no manual untagging needed.
     print('Removing type libraries')
     ida_utilities.remove_typelibs()
     print('Initializing segments')

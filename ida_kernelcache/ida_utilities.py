@@ -19,8 +19,11 @@ import ida_funcs
 import ida_name
 import ida_auto
 import ida_typeinf
+import ida_ida
 
-read_ptr = idaapi.get_qword if idaapi.get_inf_structure().is_64bit() else idaapi.get_dword
+from . import compat as _compat
+
+read_ptr = idaapi.get_qword if ida_ida.inf_is_64bit() else idaapi.get_dword
 
 def make_log(log_level, module):
     """Create a logging function."""
@@ -44,19 +47,14 @@ LITTLE_ENDIAN = True
 """Whether the current platform is little-endian. Always the opposite of BIG_ENDIAN."""
 
 def _initialize():
-    # https://reverseengineering.stackexchange.com/questions/11396/how-to-get-the-cpu-architecture-via-idapython
     global WORD_SIZE, LITTLE_ENDIAN, BIG_ENDIAN
-    info = idaapi.get_inf_structure()
-    if info.is_64bit():
+    if ida_ida.inf_is_64bit():
         WORD_SIZE = 8
-    elif info.is_32bit():
+    elif ida_ida.inf_is_32bit_exactly():
         WORD_SIZE = 4
     else:
         WORD_SIZE = 2
-    try:
-        BIG_ENDIAN = info.is_be()
-    except:
-        BIG_ENDIAN = info.mf
+    BIG_ENDIAN    = ida_ida.inf_is_be()
     LITTLE_ENDIAN = not BIG_ENDIAN
 
 _initialize()
@@ -136,12 +134,12 @@ def get_ea_name(ea, fromaddr=idc.BADADDR, true=False, user=False):
     Returns:
         The name of the address or "".
     """
-    if user and not idc.hasUserName(ida_bytes.get_full_flags(ea)):
+    if user and not _compat.has_user_name(ida_bytes.get_full_flags(ea)):
         return ""
     if true:
         return ida_name.get_ea_name(fromaddr, ea)
     else:
-        return idc.get_name(ea, ida_name.GN_VISIBLE | idc.calc_gtn_flags(fromaddr, ea))
+        return idc.get_name(ea, ida_name.GN_VISIBLE | _compat.calc_gtn_flags(fromaddr, ea))
 
 
 
@@ -161,25 +159,16 @@ def set_ea_name(ea, name, rename=False, auto=False):
     Returns:
         True if the address was successfully named (or renamed).
     """
-    if not rename and idc.hasUserName(ida_bytes.get_full_flags(ea)):
+    if not rename and _compat.has_user_name(ida_bytes.get_full_flags(ea)):
         return get_ea_name(ea) == name
-    flags = idc.SN_CHECK
+    flags = _compat.SN_CHECK
     if auto:
-        flags |= idc.SN_AUTO
+        flags |= _compat.SN_AUTO
     return bool(idc.set_name(ea, name, flags))
 
-def _insn_op_stroff_700(insn, n, sid, delta):
-    """A wrapper of idc.op_stroff for IDA 7."""
+def insn_op_stroff(insn, n, sid, delta):
+    """Apply a struct offset type to an instruction operand (IDA 9.x)."""
     return idc.op_stroff(insn, n, sid, delta)
-
-def _insn_op_stroff_695(insn, n, sid, delta):
-    """A wrapper of idc.op_stroff for IDA 6.95."""
-    return idc.op_stroff(insn.ea, n, sid, delta)
-
-if idaapi.IDA_SDK_VERSION < 700:
-    insn_op_stroff = _insn_op_stroff_695
-else:
-    insn_op_stroff = _insn_op_stroff_700
 
 def _addresses(start, end, step, partial, aligned):
     """A generator to iterate over the addresses in an address range."""
@@ -385,13 +374,13 @@ def _read_struct_member_once(ea, flags, size, member_sid, member_size, asobject)
 
 def _read_struct_member(struct, sid, union, ea, offset, name, size, asobject):
     """Read a member into a struct for read_struct."""
-    flags = idc.get_member_flag(sid, offset)
+    flags = _compat.get_member_flag(sid, offset)
     assert flags != -1
     # Extra information for parsing a struct.
     member_sid, member_ssize = None, None
     if ida_bytes.is_struct(flags):
-        member_sid = idc.get_member_strid(sid, offset)
-        member_ssize = idaapi.get_struc_size(member_sid)
+        member_sid = _compat.get_member_strid(sid, offset)
+        member_ssize = _compat.get_struc_size(member_sid)
     # Get the address of the start of the member.
     member = ea
     if not union:
@@ -431,7 +420,7 @@ def read_struct(ea, struct=None, sid=None, members=None, asobject=False):
     """
     # Handle sid/struct.
     if struct is not None:
-        sid2 = idaapi.get_struc_id(struct)
+        sid2 = _compat.get_struc_id(struct)
         if sid2 == idc.BADADDR:
             raise ValueError('Invalid struc name {}'.format(struct))
         if sid is not None and sid2 != sid:
@@ -440,17 +429,17 @@ def read_struct(ea, struct=None, sid=None, members=None, asobject=False):
     else:
         if sid is None:
             raise ValueError('Invalid arguments: sid={}, struct={}'.format(sid, struct))
-        if idaapi.get_struc_name(sid) is None:
+        if _compat.get_struc_name(sid) is None:
             raise ValueError('Invalid struc id {}'.format(sid))
     # Iterate through the members and add them to the struct.
-    union = idc.is_union(sid)
+    union = _compat.is_union(sid)
     struct = {}
     for offset, name, size in idautils.StructMembers(sid):
         if members is not None and name not in members:
             continue
         _read_struct_member(struct, sid, union, ea, offset, name, size, asobject)
     if asobject:
-        struct = objectview(struct, ea, idaapi.get_struc_size(sid))
+        struct = objectview(struct, ea, _compat.get_struc_size(sid))
     return struct
 
 def null_terminated(string):
@@ -576,7 +565,7 @@ def struct_create(name, union=False):
     ordinal = ida_typeinf.get_type_ordinal(til, name)
     if ordinal in (0, -1, idc.BADADDR, ida_typeinf.BADORD):
         union = 1 if union else 0
-        sid = idc.add_struc(-1, name, union)
+        sid = _compat.add_struc(-1, name, union)
     else:
         tif = ida_typeinf.tinfo_t()
         tif.get_numbered_type(til, ordinal, ida_typeinf.BTF_UNION if union else ida_typeinf.BTF_STRUCT)
@@ -589,7 +578,7 @@ def struct_create(name, union=False):
             tif.create_udt(udt)
             # replace old ordinal with new struct:
             tif.set_numbered_type(til, ordinal, ida_typeinf.NTF_REPLACE, name)
-            sid = idaapi.get_struc_id(name)
+            sid = _compat.get_struc_id(name)
         else:
             # type exists but is not a forward decl?
             return None
@@ -599,47 +588,42 @@ def struct_create(name, union=False):
 
 def struct_open(name, create=False, union=None):
     """Get the SID of the IDA struct with the given name, optionally creating it."""
-    sid = idaapi.get_struc_id(name)
+    sid = _compat.get_struc_id(name)
     if sid == idc.BADADDR:
         if not create:
             return None
         sid = struct_create(name, union=bool(union))
     elif union is not None:
-        is_union = bool(idc.is_union(sid))
+        is_union = bool(_compat.is_union(sid))
         if union != is_union:
             return None
     return sid
 
 def struct_member_offset(sid, name):
-    """A version of IDA's GetMemberOffset() that also works with unions."""
-    struct = idaapi.get_struc(sid)
-    if not struct:
-        return None
-    member = idaapi.get_member_by_name(struct, name)
-    if not member:
-        return None
-    return member.soff
+    """Return the byte offset of *name* within struct *sid*, or None if not found."""
+    offset = idc.get_member_offset(sid, name)
+    return None if offset == -1 else offset
 
 def struct_add_word(sid, name, offset, size, count=1):
     """Add a word (integer) to a structure.
 
     If sid is a union, offset must be -1.
     """
-    return idc.add_struc_member(sid, name, offset, idc.FF_DATA | word_flag(size), -1, size * count)
+    return _compat.add_struc_member(sid, name, offset, _compat.FF_DATA | word_flag(size), -1, size * count)
 
 def struct_add_ptr(sid, name, offset, count=1, type=None):
     """Add a pointer to a structure.
 
     If sid is a union, offset must be -1.
     """
-    ptr_flag = idc.FF_DATA | word_flag(WORD_SIZE) | ida_bytes.off_flag()
-    ret = idc.add_struc_member(sid, name, offset, ptr_flag, 0, WORD_SIZE)
+    ptr_flag = _compat.FF_DATA | word_flag(WORD_SIZE) | ida_bytes.off_flag()
+    ret = _compat.add_struc_member(sid, name, offset, ptr_flag, 0, WORD_SIZE)
     if ret == 0 and type is not None:
         if offset == -1:
             offset = struct_member_offset(sid, name)
             assert offset is not None
-        mid = idc.get_member_id(sid, offset)
-        idc.SetType(mid, type)
+        mid = _compat.get_member_id(sid, offset)
+        _compat.set_type(mid, type)
     return ret
 
 def struct_add_struct(sid, name, offset, msid, count=1):
@@ -647,8 +631,8 @@ def struct_add_struct(sid, name, offset, msid, count=1):
 
     If sid is a union, offset must be -1.
     """
-    size = idaapi.get_struc_size(msid)
-    return idc.add_struc_member(sid, name, offset, idc.FF_DATA | ida_bytes.FF_STRUCT, msid, size * count)
+    size = _compat.get_struc_size(msid)
+    return _compat.add_struc_member(sid, name, offset, _compat.FF_DATA | ida_bytes.FF_STRUCT, msid, size * count)
 
 def remove_typelibs():
     """Iterate over all .til files amd attempt to remove them

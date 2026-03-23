@@ -13,6 +13,7 @@ import idaapi
 
 from . import ida_utilities as idau
 from . import kplist
+from . import compat
 
 _log = idau.make_log(0, __name__)
 
@@ -22,29 +23,30 @@ def find_kernel_base():
     base = idaapi.get_fileregion_ea(0)
     if base != idaapi.BADADDR:
         return base
-    
-    # Method 2: Find a segment named '__TEXT.HEADER' or '__TEXT:HEADER'.
+
+    # Method 2: Find a segment explicitly named '__TEXT.HEADER' or '__TEXT:HEADER'.
     seg = [seg for seg in map(idaapi.get_segm_by_name, ['__TEXT.HEADER', '__TEXT:HEADER']) if seg]
     if seg:
         return seg[0].start_ea
 
-    # Method 3: Search for the Mach-O magic number as a last resort.
-    _log(1, "Could not find kernel base by segment name, searching for Mach-O header magic...")
-    # MH_MAGIC_64 = 0xFEEDFACF
-    # In little-endian bytes, this is CF FA ED FE.
-    magic_bytes = b'\xCF\xFA\xED\xFE'
+    # Method 3: Scan every segment for the Mach-O 64-bit magic at its start.
+    # Uses direct byte comparison (avoids find_binary format issues in IDA 9.x).
+    # The kernel is always the lowest-addressed Mach-O in the kernelcache, so we
+    # collect all candidates and return the one at the lowest EA.
+    _log(1, "Searching for Mach-O header magic across all segments...")
+    magic = b'\xCF\xFA\xED\xFE'   # MH_MAGIC_64 little-endian
+    best = idaapi.BADADDR
     for seg_start in idautils.Segments():
         seg = idaapi.getseg(seg_start)
         if not seg:
             continue
-        # Search only in the first few bytes of each segment for efficiency
-        search_end = min(seg.start_ea + 0x1000, seg.end_ea)
-        addr = idc.find_binary(seg.start_ea, search_end, magic_bytes.hex(), 16, idaapi.SEARCH_DOWN)
-        if addr != idaapi.BADADDR:
-            _log(0, "Found potential kernel base at {:#x} in segment '{}'", addr, idc.get_segm_name(seg))
-            # Rename the segment for consistency
-            idc.set_segm_name(addr, '__TEXT.HEADER')
-            return addr
+        data = idc.get_bytes(seg.start_ea, len(magic))
+        if data == magic and seg.start_ea < best:
+            best = seg.start_ea
+    if best != idaapi.BADADDR:
+        _log(0, "Found kernel base at {:#x} in segment '{}'", best, idc.get_segm_name(best))
+        idc.set_segm_name(best, '__TEXT.HEADER')
+        return best
 
     raise RuntimeError("unable to find kernel base")
 
